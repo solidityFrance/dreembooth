@@ -335,10 +335,17 @@ class MHAProcessor:
             kdim=attn.to_k.in_features,
             vdim=attn.to_v.in_features,
             batch_first=True,
-        ).to(attn.to_q.weight.device, dtype=attn.to_q.weight.dtype)
+            device=attn.to_q.weight.device,
+            dtype=attn.to_q.weight.dtype
+        )
+        if not attn.training:
+            attn.mha.eval()
         # copy weights
         if attn.to_q.out_features == attn.to_k.in_features:
             attn.mha.in_proj_weight.data = torch.cat([attn.to_q.weight, attn.to_k.weight, attn.to_v.weight])
+            attn.mha.in_proj_bias = nn.Parameter(
+                torch.zeros(attn.mha.in_proj_weight.shape[0], dtype=attn.mha.in_proj_weight.dtype, device=attn.mha.in_proj_weight.device)
+            )
         else:
             attn.mha.q_proj_weight = attn.to_q.weight
             attn.mha.k_proj_weight = attn.to_k.weight
@@ -375,7 +382,6 @@ class MHAProcessor:
             attn_mask=attention_mask,
             need_weights=False
         )[0]
-
         return hidden_states
 
 
