@@ -320,6 +320,65 @@ class CrossAttnProcessor:
         return hidden_states
 
 
+class MHAProcessor:
+    def setup_mha(
+        self,
+        attn: CrossAttention,
+    ):
+        bias = attn.to_k.bias is not None
+        assert bias == False
+        attn.mha = nn.MultiheadAttention(
+            embed_dim=attn.to_q.out_features,
+            num_heads=attn.heads,
+            dropout=attn.to_out[1].p,
+            bias=bias,
+            kdim=attn.to_k.in_features,
+            vdim=attn.to_v.in_features,
+            batch_first=True,
+        ).to(attn.to_q.weight.device, dtype=attn.to_q.weight.dtype)
+        # copy weights
+        if attn.to_q.out_features == attn.to_k.in_features:
+            attn.mha.in_proj_weight.data = torch.cat([attn.to_q.weight, attn.to_k.weight, attn.to_v.weight])
+        else:
+            attn.mha.q_proj_weight = attn.to_q.weight
+            attn.mha.k_proj_weight = attn.to_k.weight
+            attn.mha.v_proj_weight = attn.to_v.weight
+        attn.mha.out_proj.weight = attn.to_out[0].weight
+        attn.mha.out_proj.bias = attn.to_out[0].bias
+        delattr(attn, "to_q")
+        delattr(attn, "to_k")
+        delattr(attn, "to_v")
+        delattr(attn, "to_out")
+
+    def __call__(
+        self,
+        attn: CrossAttention,
+        hidden_states,
+        encoder_hidden_states=None,
+        attention_mask=None,
+    ):
+        # check if attn has mha attribute
+        if not hasattr(attn, "mha"):
+            self.setup_mha(attn)
+        batch_size, sequence_length, _ = hidden_states.shape
+        attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
+
+        if encoder_hidden_states is None:
+            encoder_hidden_states = hidden_states
+        elif attn.cross_attention_norm:
+            encoder_hidden_states = attn.norm_cross(encoder_hidden_states)
+
+        hidden_states = attn.mha(
+            hidden_states,
+            encoder_hidden_states,
+            encoder_hidden_states,
+            attn_mask=attention_mask,
+            need_weights=False
+        )[0]
+
+        return hidden_states
+
+
 class LoRALinearLayer(nn.Module):
     def __init__(self, in_features, out_features, rank=4):
         super().__init__()
@@ -631,4 +690,5 @@ AttnProcessor = Union[
     SlicedAttnAddedKVProcessor,
     LoRACrossAttnProcessor,
     LoRAXFormersCrossAttnProcessor,
+    MHAProcessor
 ]

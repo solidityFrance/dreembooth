@@ -460,7 +460,11 @@ class StableDiffusionPipeline(DiffusionPipeline):
         prompt: Union[str, List[str]] = None,
         height: Optional[int] = None,
         width: Optional[int] = None,
+        hires_height: Optional[int] = None,
+        hires_width: Optional[int] = None,
+        denoising_strength: float = 0.5,
         num_inference_steps: int = 50,
+        hires_steps: Optional[int] = 0,
         guidance_scale: float = 7.5,
         negative_prompt: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
@@ -582,6 +586,9 @@ class StableDiffusionPipeline(DiffusionPipeline):
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps
 
+        if hires_steps > 0:
+            timesteps = torch.cat([timesteps, torch.empty(hires_steps, dtype=timesteps.dtype, device=timesteps.device)])
+
         # 5. Prepare latent variables
         num_channels_latents = self.unet.in_channels
         latents = self.prepare_latents(
@@ -599,8 +606,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
         # 7. Denoising loop
-        num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
-        with self.progress_bar(total=num_inference_steps) as progress_bar:
+        num_warmup_steps = len(timesteps) - (num_inference_steps+hires_steps) * self.scheduler.order
+        with self.progress_bar(total=num_inference_steps+hires_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
@@ -621,6 +628,18 @@ class StableDiffusionPipeline(DiffusionPipeline):
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+
+                if hires_steps > 0 and i == num_inference_steps-1:
+                    # latents = 1 / 0.18215 * latents
+                    # image = self.vae.decode(latents).sample
+                    # image = torch.nn.functional.interpolate(image, scale_factor=(hires_height/height, hires_width/width), mode="bilinear", antialias=True)
+                    # latents = self.vae.encode(image).latent_dist.sample(generator=generator) * 0.18215
+                    latents = torch.nn.functional.interpolate(latents, scale_factor=(hires_height/height, hires_width/width)) #, mode="nearest")
+
+                    self.scheduler.set_timesteps(round(hires_steps/denoising_strength), device=device)
+                    timesteps[-hires_steps:] = self.scheduler.timesteps[-hires_steps:]
+                    noise = randn_tensor(latents.shape, generator=generator, device=device, dtype=latents.dtype)
+                    latents = self.scheduler.add_noise(latents, noise, timesteps[-hires_steps:-hires_steps+1])
 
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
